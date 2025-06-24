@@ -181,7 +181,7 @@ def _mk_feed(title: str) -> FeedGenerator:
     fg = FeedGenerator()
     fg.load_extension("rss")
     fg.title(title)
-    fg.link(href="https://magentic.example.com")
+    fg.link(href="http://localhost:8000")
     fg.language("en")
     return fg
 
