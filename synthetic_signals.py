@@ -183,6 +183,7 @@ def _mk_feed(title: str) -> FeedGenerator:
     # python-feedgen already outputs RSS; no extension module required
     fg.title(title)
     fg.link(href="http://localhost:8000")
+    fg.description("Synthetic data feed")
     fg.language("en")
     return fg
 
