@@ -9,7 +9,7 @@ It provides:
 5. **Supplier↔Vessel mapping table** → nightly CSV refresh.
 
 Run with:
-    $ pip install fastapi uvicorn[standard] faker aiokafka feedgen pandas
+    $ pip install fastapi uvicorn[standard] faker aiokafka python-feedgen pandas
     $ export KAFKA_BOOTSTRAP_SERVERS=localhost:9092
     $ uvicorn synthetic_signals:app --reload
 
@@ -179,7 +179,7 @@ _news_feed_xml: str = ""
 
 def _mk_feed(title: str) -> FeedGenerator:
     fg = FeedGenerator()
-    fg.load_extension("rss")
+    # python-feedgen already outputs RSS; no extension module required
     fg.title(title)
     fg.link(href="http://localhost:8000")
     fg.language("en")
