@@ -30,6 +30,8 @@ h11==0.16.0
     # via uvicorn
 idna==3.10
     # via anyio
+kafka-python==2.2.13
+    # via forward-deployed-eng-interview
 lxml==5.4.0
     # via feedgen
 numpy==2.3.1

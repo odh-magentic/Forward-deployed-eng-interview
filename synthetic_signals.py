@@ -99,9 +99,28 @@ class PortCongestionRecord(BaseModel):
 # ───────────────️ AIS Producer ────────────────
 async def ais_producer(stop_event: asyncio.Event) -> None:
     """Continuously push synthetic AIS JSON messages to Kafka."""
-    producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS)
-    await producer.start()
-    print("[AIS] Producer started → topic", KAFKA_AIS_TOPIC)
+    producer = AIOKafkaProducer(
+        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+        metadata_max_age_ms=30000,  # Refresh metadata every 30 seconds
+        request_timeout_ms=30000,  # 30 second timeout for requests
+        retry_backoff_ms=100,  # Backoff between retries
+    )
+
+    # Add retry logic for producer startup
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            await producer.start()
+            print(f"[AIS] Producer started → topic {KAFKA_AIS_TOPIC}")
+            break
+        except Exception as e:
+            print(
+                f"[AIS] Producer start attempt {attempt + 1}/{max_retries} failed: {e}"
+            )
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2**attempt)  # Exponential backoff
+            else:
+                raise
     try:
         msgs_per_tick = AIS_MSGS_PER_SEC // 10  # send 10×/sec to smooth load
         tick_interval = 0.1
@@ -119,8 +138,13 @@ async def ais_producer(stop_event: asyncio.Event) -> None:
                     timestamp=now_iso,
                 )
                 batch.append(msg.model_dump_json().encode())
+            # Send messages with error handling
             for b in batch:
-                await producer.send_and_wait(KAFKA_AIS_TOPIC, b)
+                try:
+                    await producer.send_and_wait(KAFKA_AIS_TOPIC, b)
+                except Exception as e:
+                    print(f"[AIS] Failed to send message: {e}")
+                    # Continue with next message rather than crashing
             await asyncio.sleep(tick_interval)
     finally:
         await producer.stop()
