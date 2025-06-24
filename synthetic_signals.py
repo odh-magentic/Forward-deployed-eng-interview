@@ -1,26 +1,3 @@
-"""
-Synthetic signal generator for the “Zero‑to‑Dashboard” interview scenario.
-
-It provides:
-1. **AIS vessel stream** → Kafka (≈12 000 msgs/s configurable).
-2. **Port congestion REST API** → JSON payload via FastAPI.
-3. **NOAA‑style severe‑weather RSS feed** → XML via FastAPI.
-4. **Geopolitical news RSS feed** → XML via FastAPI.
-5. **Supplier↔Vessel mapping table** → nightly CSV refresh.
-
-Run with:
-    $ pip install fastapi uvicorn[standard] faker aiokafka python-feedgen pandas
-    $ export KAFKA_BOOTSTRAP_SERVERS=localhost:9092
-    $ uvicorn synthetic_signals:app --reload
-
-Configuration:
-    ENV vars or CLI flags (see bottom) control volumes & refresh periods.
-
-The code is intentionally minimal but production‑ish: asyncio, graceful shutdown,
-health probes, and typed pydantic models.
-"""
-
-import asyncio
 import csv
 import datetime as dt
 import json
