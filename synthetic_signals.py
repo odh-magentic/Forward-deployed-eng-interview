@@ -26,6 +26,7 @@ import datetime as dt
 import json
 import os
 import random
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List
 
@@ -105,7 +106,7 @@ async def ais_producer(stop_event: asyncio.Event) -> None:
         msgs_per_tick = AIS_MSGS_PER_SEC // 10  # send 10×/sec to smooth load
         tick_interval = 0.1
         while not stop_event.is_set():
-            now_iso = dt.datetime.utcnow().isoformat()
+            now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
             batch: List[bytes] = []
             for _ in range(msgs_per_tick):
                 msg = AISMessage(
@@ -117,7 +118,7 @@ async def ais_producer(stop_event: asyncio.Event) -> None:
                     cog=round(random.uniform(0, 359), 0),
                     timestamp=now_iso,
                 )
-                batch.append(msg.json().encode())
+                batch.append(msg.model_dump_json().encode())
             for b in batch:
                 await producer.send_and_wait(KAFKA_AIS_TOPIC, b)
             await asyncio.sleep(tick_interval)
@@ -134,7 +135,7 @@ async def refresh_supplier_table(stop_event: asyncio.Event) -> None:
         with SUPPLIER_TABLE_PATH.open("w", newline="") as fp:
             writer = csv.writer(fp)
             writer.writerow(["supplier_id", "supplier_name", "imo", "last_updated"])
-            now = dt.datetime.utcnow().isoformat()
+            now = dt.datetime.now(dt.timezone.utc).isoformat()
             for sid in range(1, SUPPLIER_TABLE_ROWS + 1):
                 writer.writerow(
                     [
@@ -154,7 +155,7 @@ _port_cache: List[PortCongestionRecord] = []
 def _generate_port_congestion() -> None:
     """Populate the in‑memory port congestion cache."""
     global _port_cache
-    now_iso = dt.datetime.utcnow().isoformat()
+    now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
     _port_cache = [
         PortCongestionRecord(
             port=p,
@@ -194,7 +195,7 @@ def _refresh_weather_feed():
         fe.id(faker.uuid4())
         fe.title(f"{random.choice(SEVERITY_LEVELS)} storm near {faker.city()}")
         fe.summary(faker.sentence())
-        fe.published(dt.datetime.utcnow())
+        fe.published(dt.datetime.now(dt.timezone.utc))
     _weather_feed_xml = fg.rss_str(pretty=True).decode()
 
 
@@ -207,7 +208,7 @@ def _refresh_news_feed():
         theme = random.choice(GEOPOLITICAL_THEMES)
         fe.title(f"{theme} impacts shipping through {faker.country()}")
         fe.summary(faker.paragraph())
-        fe.published(dt.datetime.utcnow())
+        fe.published(dt.datetime.now(dt.timezone.utc))
     _news_feed_xml = fg.rss_str(pretty=True).decode()
 
 
@@ -219,22 +220,38 @@ async def rss_refresher(stop_event: asyncio.Event) -> None:
 
 
 # ─────────────── FastAPI App ────────────────
-app = FastAPI(title="Synthetic Magentic Signal Endpoints", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    stop_event = asyncio.Event()
+    app.state.stop_event = stop_event
+
+    # Initialize data
+    _generate_port_congestion()
+    try:
+        _refresh_weather_feed()
+        _refresh_news_feed()
+    except Exception as e:
+        print(f"[STARTUP] Error initializing RSS feeds: {e}")
+
+    # Start background tasks
+    tasks = [
+        asyncio.create_task(ais_producer(stop_event)),
+        asyncio.create_task(port_congestion_refresher(stop_event)),
+        asyncio.create_task(rss_refresher(stop_event)),
+        asyncio.create_task(refresh_supplier_table(stop_event)),
+    ]
+
+    yield
+
+    # Shutdown
+    stop_event.set()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
-@app.on_event("startup")
-async def _start_background_tasks():
-    app.state.stop_event = asyncio.Event()
-    loop = asyncio.get_event_loop()
-    loop.create_task(ais_producer(app.state.stop_event))
-    loop.create_task(port_congestion_refresher(app.state.stop_event))
-    loop.create_task(rss_refresher(app.state.stop_event))
-    loop.create_task(refresh_supplier_table(app.state.stop_event))
-
-
-@app.on_event("shutdown")
-async def _shutdown_background_tasks():
-    app.state.stop_event.set()
+app = FastAPI(
+    title="Synthetic Magentic Signal Endpoints", version="0.1.0", lifespan=lifespan
+)
 
 
 @app.get("/healthz")
