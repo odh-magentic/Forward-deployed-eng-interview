@@ -1,0 +1,32 @@
+[project]
+name = "forward-deployed-eng-interview"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "odh-magentic", email = "odh@magentic.com" }
+]
+dependencies = [
+    "pandas>=2.3.0",
+    "faker>=37.4.0",
+    "feedgen>=1.0.0",
+    "pydantic>=2.11.7",
+    "fastapi>=0.115.13",
+    "aiokafka>=0.12.0",
+    "uvicorn>=0.34.3",
+]
+readme = "README.md"
+requires-python = ">= 3.8"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.rye]
+managed = true
+dev-dependencies = []
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/forward_deployed_eng_interview"]

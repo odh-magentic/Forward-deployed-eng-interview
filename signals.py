@@ -1,0 +1,277 @@
+"""
+Synthetic signal generator for the “Zero‑to‑Dashboard” interview scenario.
+
+It provides:
+1. **AIS vessel stream** → Kafka (≈12 000 msgs/s configurable).
+2. **Port congestion REST API** → JSON payload via FastAPI.
+3. **NOAA‑style severe‑weather RSS feed** → XML via FastAPI.
+4. **Geopolitical news RSS feed** → XML via FastAPI.
+5. **Supplier↔Vessel mapping table** → nightly CSV refresh.
+
+Run with:
+    $ pip install fastapi uvicorn[standard] faker aiokafka feedgen pandas
+    $ export KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+    $ uvicorn synthetic_signals:app --reload
+
+Configuration:
+    ENV vars or CLI flags (see bottom) control volumes & refresh periods.
+
+The code is intentionally minimal but production‑ish: asyncio, graceful shutdown,
+health probes, and typed pydantic models.
+"""
+
+import asyncio
+import csv
+import datetime as dt
+import json
+import os
+import random
+from pathlib import Path
+from typing import List
+
+import pandas as pd
+from aiokafka import AIOKafkaProducer
+from fastapi import FastAPI, Response
+from feedgen.feed import FeedGenerator
+from faker import Faker
+from pydantic import BaseModel
+
+faker = Faker()
+
+# ─────────────── Configuration ────────────────
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+KAFKA_AIS_TOPIC = os.getenv("KAFKA_AIS_TOPIC", "ais_positions")
+AIS_MSGS_PER_SEC = int(os.getenv("AIS_MSGS_PER_SEC", "12000"))
+
+PORT_CONGESTION_INTERVAL_SEC = int(os.getenv("PORT_REFRESH_SEC", "900"))  # 15 min
+WEATHER_FEED_INTERVAL_SEC = int(os.getenv("WEATHER_REFRESH_SEC", "900"))
+NEWS_FEED_INTERVAL_SEC = int(os.getenv("NEWS_REFRESH_SEC", "1800"))
+
+SUPPLIER_TABLE_PATH = Path(
+    os.getenv("SUPPLIER_TABLE_PATH", "supplier_vessel_mapping.csv")
+)
+SUPPLIER_TABLE_ROWS = int(os.getenv("SUPPLIER_TABLE_ROWS", "100000"))
+SUPPLIER_TABLE_REFRESH_HOURS = int(os.getenv("SUPPLIER_TABLE_REFRESH_HOURS", "24"))
+
+PORTS = [
+    "Shanghai",
+    "Singapore",
+    "Ningbo‑Zhoushan",
+    "Shenzhen",
+    "Guangzhou",
+    "Busan",
+    "Qingdao",
+    "Hamburg",
+    "Los Angeles",
+    "Long Beach",
+]
+SEVERITY_LEVELS = ["Minor", "Moderate", "Severe", "Extreme"]
+GEOPOLITICAL_THEMES = [
+    "Sanctions",
+    "Trade Agreement",
+    "Regulatory Change",
+    "Labor Strike",
+    "Tariff Increase",
+    "Embargo",
+    "Border Closure",
+]
+
+
+# ─────────────── Data Models ────────────────
+class AISMessage(BaseModel):
+    mmsi: int  # Maritime Mobile Service Identity
+    imo: int  # International Maritime Organization number
+    lat: float
+    lon: float
+    sog: float  # speed over ground (knots)
+    cog: float  # course over ground (degrees)
+    timestamp: str  # ISO 8601
+
+
+class PortCongestionRecord(BaseModel):
+    port: str
+    queued_vessels: int
+    avg_wait_hours: float
+    updated_at: str
+
+
+# ───────────────️ AIS Producer ────────────────
+async def ais_producer(stop_event: asyncio.Event) -> None:
+    """Continuously push synthetic AIS JSON messages to Kafka."""
+    producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS)
+    await producer.start()
+    print("[AIS] Producer started → topic", KAFKA_AIS_TOPIC)
+    try:
+        msgs_per_tick = AIS_MSGS_PER_SEC // 10  # send 10×/sec to smooth load
+        tick_interval = 0.1
+        while not stop_event.is_set():
+            now_iso = dt.datetime.utcnow().isoformat()
+            batch: List[bytes] = []
+            for _ in range(msgs_per_tick):
+                msg = AISMessage(
+                    mmsi=random.randint(200000000, 799999999),
+                    imo=random.randint(9000000, 9999999),
+                    lat=faker.coordinate(center=0, radius=90),
+                    lon=faker.coordinate(center=0, radius=180),
+                    sog=round(random.uniform(0, 22), 1),
+                    cog=round(random.uniform(0, 359), 0),
+                    timestamp=now_iso,
+                )
+                batch.append(msg.json().encode())
+            for b in batch:
+                await producer.send_and_wait(KAFKA_AIS_TOPIC, b)
+            await asyncio.sleep(tick_interval)
+    finally:
+        await producer.stop()
+        print("[AIS] Producer stopped")
+
+
+# ─────────────── Supplier↔Vessel CSV ────────────────
+async def refresh_supplier_table(stop_event: asyncio.Event) -> None:
+    """Regenerates CSV on a cadence to simulate nightly loads."""
+    while not stop_event.is_set():
+        print("[SUPPLIERS] Generating table →", SUPPLIER_TABLE_PATH)
+        with SUPPLIER_TABLE_PATH.open("w", newline="") as fp:
+            writer = csv.writer(fp)
+            writer.writerow(["supplier_id", "supplier_name", "imo", "last_updated"])
+            now = dt.datetime.utcnow().isoformat()
+            for sid in range(1, SUPPLIER_TABLE_ROWS + 1):
+                writer.writerow(
+                    [
+                        sid,
+                        faker.company(),
+                        random.randint(9000000, 9999999),
+                        now,
+                    ]
+                )
+        await asyncio.sleep(SUPPLIER_TABLE_REFRESH_HOURS * 3600)
+
+
+# ─────────────── Port Congestion Snapshot ────────────────
+_port_cache: List[PortCongestionRecord] = []
+
+
+def _generate_port_congestion() -> None:
+    """Populate the in‑memory port congestion cache."""
+    global _port_cache
+    now_iso = dt.datetime.utcnow().isoformat()
+    _port_cache = [
+        PortCongestionRecord(
+            port=p,
+            queued_vessels=random.randint(0, 80),
+            avg_wait_hours=round(random.uniform(0, 72), 1),
+            updated_at=now_iso,
+        )
+        for p in PORTS
+    ]
+
+
+async def port_congestion_refresher(stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set():
+        _generate_port_congestion()
+        await asyncio.sleep(PORT_CONGESTION_INTERVAL_SEC)
+
+
+# ─────────────── RSS Feed Helpers ────────────────
+_weather_feed_xml: str = ""
+_news_feed_xml: str = ""
+
+
+def _mk_feed(title: str) -> FeedGenerator:
+    fg = FeedGenerator()
+    fg.load_extension("rss")
+    fg.title(title)
+    fg.link(href="https://magentic.example.com")
+    fg.language("en")
+    return fg
+
+
+def _refresh_weather_feed():
+    global _weather_feed_xml
+    fg = _mk_feed("Synthetic Severe Weather Feed")
+    for _ in range(random.randint(1, 5)):
+        fe = fg.add_entry()
+        fe.id(faker.uuid4())
+        fe.title(f"{random.choice(SEVERITY_LEVELS)} storm near {faker.city()}")
+        fe.summary(faker.sentence())
+        fe.published(dt.datetime.utcnow())
+    _weather_feed_xml = fg.rss_str(pretty=True).decode()
+
+
+def _refresh_news_feed():
+    global _news_feed_xml
+    fg = _mk_feed("Synthetic Geopolitical News")
+    for _ in range(random.randint(1, 3)):
+        fe = fg.add_entry()
+        fe.id(faker.uuid4())
+        theme = random.choice(GEOPOLITICAL_THEMES)
+        fe.title(f"{theme} impacts shipping through {faker.country()}")
+        fe.summary(faker.paragraph())
+        fe.published(dt.datetime.utcnow())
+    _news_feed_xml = fg.rss_str(pretty=True).decode()
+
+
+async def rss_refresher(stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set():
+        _refresh_weather_feed()
+        _refresh_news_feed()
+        await asyncio.sleep(min(WEATHER_FEED_INTERVAL_SEC, NEWS_FEED_INTERVAL_SEC))
+
+
+# ─────────────── FastAPI App ────────────────
+app = FastAPI(title="Synthetic Magentic Signal Endpoints", version="0.1.0")
+
+
+@app.on_event("startup")
+async def _start_background_tasks():
+    app.state.stop_event = asyncio.Event()
+    loop = asyncio.get_event_loop()
+    loop.create_task(ais_producer(app.state.stop_event))
+    loop.create_task(port_congestion_refresher(app.state.stop_event))
+    loop.create_task(rss_refresher(app.state.stop_event))
+    loop.create_task(refresh_supplier_table(app.state.stop_event))
+
+
+@app.on_event("shutdown")
+async def _shutdown_background_tasks():
+    app.state.stop_event.set()
+
+
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok"}
+
+
+@app.get("/port_congestion", response_model=List[PortCongestionRecord])
+async def port_congestion():
+    return _port_cache
+
+
+@app.get("/rss/weather")
+async def weather_rss():
+    return Response(content=_weather_feed_xml, media_type="application/rss+xml")
+
+
+@app.get("/rss/geopolitics")
+async def geopolitics_rss():
+    return Response(content=_news_feed_xml, media_type="application/rss+xml")
+
+
+@app.get("/supplier_mapping")
+async def supplier_mapping(n: int = 100):
+    """Return the first *n* supplier‑vessel rows as JSON for quick inspection."""
+    df = pd.read_csv(SUPPLIER_TABLE_PATH, nrows=n)
+    return json.loads(df.to_json(orient="records"))
+
+
+# ─────────────── CLI Entrypoint ────────────────
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "synthetic_signals:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=False,
+        log_level="info",
+    )
